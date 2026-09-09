@@ -1,0 +1,64 @@
+{
+  "name": "dsh-image-generation",
+  "version": "0.1.0",
+  "description": "DSH 生图插件：在设置中配置多个生图供应商/模型，并在对话中通过 image_generate 调用当前选中的模型。",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "plugin",
+    "image-generation",
+    "cordis"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whiteS18/dsh-image-generation.git"
+  },
+  "bugs": "https://github.com/whiteS18/dsh-image-generation/issues",
+  "homepage": "https://github.com/whiteS18/dsh-image-generation#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-attachment": ">=0.1.1-rc.2",
+    "@deepseek-ai/dsh-credentials": ">=0.1.2-alpha.1",
+    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.5",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.2-alpha.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.2-alpha.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
