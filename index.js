@@ -1,5 +1,5 @@
 /**
- * dsh-image-gen — Host half.
+ * dsh-image-generation — Host half.
  *
  * Two settings namespaces:
  *   - `image-gen`          catalog of image providers + models (Settings → 生图配置)
@@ -14,7 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 
-export const name = 'dsh-image-gen'
+export const name = 'dsh-image-generation'
 
 export const inject = ['tools']
 
@@ -30,7 +30,7 @@ export const API_FORMATS = Object.freeze([
 ])
 
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
-const USER_AGENT = 'dsh-image-gen/0.1.0'
+const USER_AGENT = 'dsh-image-generation/0.1.1'
 const DEFAULT_SIZE = '1024x1024'
 const DEFAULT_QUALITY = 'auto'
 
@@ -683,7 +683,7 @@ function createImageGenerateTool(ctx, currentCatalog, currentRuntime) {
               ...ref.name === undefined ? {} : { name: ref.name },
             })
           } catch (error) {
-            ctx.logger?.warn?.(`dsh-image-gen: could not attach ${paths[index]}: ${error instanceof Error ? error.message : String(error)}`)
+            ctx.logger?.warn?.(`dsh-image-generation: could not attach ${paths[index]}: ${error instanceof Error ? error.message : String(error)}`)
           }
         }
       }
@@ -752,7 +752,7 @@ function registerRpc(ctx) {
       } catch (error) {
         return failure(error)
       }
-    }, { authority: 'loopback' }), 'dsh-image-gen: /image-gen rpc channel')
+    }, { authority: 'loopback' }), 'dsh-image-generation: /image-gen rpc channel')
   })
 }
 

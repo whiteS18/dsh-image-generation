@@ -36,6 +36,15 @@ npm：
 dsh plugin --profile <name> add dsh-image-generation
 ```
 
+> [!WARNING]
+> `0.1.0` 的 `__ModuleLoader__` id 仍是 `dsh-image-gen`，DSH 会按包名 `dsh-image-generation` 校验并拒绝启动。请安装 `0.1.1` 或更新版本。已装 `0.1.0` 的 profile：
+>
+> ```sh
+> dsh plugin --profile <name> add dsh-image-generation@0.1.1
+> ```
+>
+> 然后完全退出并重新打开 DSH。
+
 GitHub：
 
 ```sh
@@ -45,7 +54,7 @@ dsh plugin --profile <name> add github:whiteS18/dsh-image-generation
 本地检出：
 
 ```sh
-dsh plugin --profile <name> add /绝对路径/dsh-image-gen
+dsh plugin --profile <name> add /绝对路径/dsh-image-generation
 ```
 
 > [!IMPORTANT]
@@ -88,5 +97,7 @@ Install:
 ```sh
 dsh plugin --profile <name> add dsh-image-generation
 ```
+
+`0.1.0` registered the client as `dsh-image-gen` and DSH refused to boot. Use `0.1.1` or later (`dsh plugin --profile <name> add dsh-image-generation@0.1.1`), then fully quit and reopen DSH.
 
 API keys are stored through the credentials service. Generated files land in `generate/image/` of the session workspace and are shown inline in the conversation.

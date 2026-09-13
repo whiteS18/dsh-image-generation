@@ -1,12 +1,12 @@
 /**
- * dsh-image-gen — Client half.
+ * dsh-image-generation — Client half.
  *
  * - Settings → 生图配置: add/edit image providers and their models
  * - Settings → 插件 → 插件配置 → 图形生成: pick the single model the tool uses
  * - tool.call.toolview for image_generate: inline gallery
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-image-gen',
+  id: 'dsh-image-generation',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -26,10 +26,10 @@ window.__ModuleLoader__.load({
 
     function ensureSelectCss() {
       if (typeof document === 'undefined') return
-      if (document.querySelector('style[data-plugin-css="dsh-image-gen-select"]')) return
+      if (document.querySelector('style[data-plugin-css="dsh-image-generation-select"]')) return
       const tag = document.createElement('style')
-      tag.dataset.plugin = 'dsh-image-gen'
-      tag.dataset.pluginCss = 'dsh-image-gen-select'
+      tag.dataset.plugin = 'dsh-image-generation'
+      tag.dataset.pluginCss = 'dsh-image-generation-select'
       tag.textContent = SELECT_CSS
       document.head.appendChild(tag)
     }
@@ -941,7 +941,7 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       ensureSelectCss()
-      ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-image-gen: copy dictionaries')
+      ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-image-generation: copy dictionaries')
       const t = ctx.locale.bind(LOCALE_NS)
       const catalog = ctx.settingsScope.bind({ namespace: CATALOG_NS })
       const runtime = ctx.settingsScope.bind({ namespace: RUNTIME_NS })
