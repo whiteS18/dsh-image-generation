@@ -74,6 +74,40 @@ export const RuntimeConfig = z.object({
   defaultQuality: z.string().default(DEFAULT_QUALITY),
 })
 
+/**
+ * Mark a schema field volatile when the runtime's schemastery supports it
+ * (DSH >= 0.1.6). Volatile fields are editable through the client's
+ * configuration forms and hot-committed into the running fiber's references;
+ * older runtimes lack the method and keep the fields plain defaults.
+ */
+const maybeVolatile = (schema) => (schema && typeof schema.volatile === 'function' ? schema.volatile() : schema)
+
+/**
+ * Cordis Config for this plugin's loader entry (`image-gen`). DSH >= 0.1.6
+ * removed `settings.installSection`; the catalog and the runtime selection
+ * live here as volatile fields instead — one entry, so the client's
+ * `configForms.get('image-gen')` serves both.
+ */
+export const Config = z.object({
+  providers: maybeVolatile(z.array(providerSchema).default([])),
+  enabled: maybeVolatile(z.boolean().default(true)),
+  providerId: maybeVolatile(z.string().default('')),
+  modelId: maybeVolatile(z.string().default('')),
+  defaultSize: maybeVolatile(z.string().default(DEFAULT_SIZE)),
+  defaultQuality: maybeVolatile(z.string().default(DEFAULT_QUALITY)),
+})
+
+/**
+ * Unwrap one config field that may be a live Volatile reference (DSH >= 0.1.6
+ * hot-commits volatile writes into the box) or a plain value.
+ */
+function unwrapVolatile(value) {
+  if (value && typeof value === 'object' && typeof value.get === 'function') {
+    try { return value.get() } catch { return undefined }
+  }
+  return value
+}
+
 function emptyCatalog() {
   return { providers: [] }
 }
@@ -756,11 +790,27 @@ function registerRpc(ctx) {
   })
 }
 
-export function apply(ctx) {
-  let currentCatalog = () => emptyCatalog()
-  let currentRuntime = () => emptyRuntime()
+export function apply(ctx, config) {
+  // Default readers: DSH >= 0.1.6, where the merged Config's volatile fields
+  // carry the catalog and the runtime selection. Read at call time so a
+  // hot-committed volatile write takes effect on the next tool call.
+  const read = (key, fallback) => {
+    const value = unwrapVolatile(config?.[key])
+    return value === undefined ? fallback : value
+  }
+  let currentCatalog = () => ({ providers: Array.isArray(read('providers', [])) ? read('providers', []) : [] })
+  let currentRuntime = () => ({
+    enabled: read('enabled', true),
+    providerId: read('providerId', ''),
+    modelId: read('modelId', ''),
+    defaultSize: read('defaultSize', DEFAULT_SIZE),
+    defaultQuality: read('defaultQuality', DEFAULT_QUALITY),
+  })
 
+  // DSH <= 0.1.5: the settings service installs schema-driven sections and
+  // streams live sources through setSource, overriding the config readers.
   ctx.inject(['settings'], (settingsCtx) => {
+    if (typeof settingsCtx.settings?.installSection !== 'function') return
     settingsCtx.settings.installSection(ctx, CATALOG_NS, CatalogConfig, emptyCatalog(), {
       setSource: (source) => {
         currentCatalog = source

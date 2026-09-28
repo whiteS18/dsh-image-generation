@@ -14,12 +14,15 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    const IconTrash = primitives.IconTrashOutline16
-    const IconClose = primitives.IconCloseOutline16
-    const IconPlus = primitives.IconPlusOutline16
-    const IconChevronDown = primitives.IconChevronDownOutline14
-    const IconChevronUp = primitives.IconChevronUpOutline14
-    const IconSparkle = primitives.IconSparkle16
+    // Icon exports were renamed in DSH 0.1.7 (size suffix dropped in favor of
+    // Regular/Medium weights); resolve whichever name this runtime exports.
+    const pickIcon = (...names) => names.map((n) => primitives[n]).find((v) => typeof v === 'function')
+    const IconTrash = pickIcon('IconTrashOutline16', 'IconTrashOutlineRegular', 'IconTrashOutlineMedium')
+    const IconClose = pickIcon('IconCloseOutline16', 'IconCloseOutlineRegular', 'IconCloseOutlineMedium')
+    const IconPlus = pickIcon('IconPlusOutline16', 'IconPlusOutlineRegular', 'IconPlusOutlineMedium')
+    const IconChevronDown = pickIcon('IconChevronDownOutline14', 'IconChevronDownOutlineRegular', 'IconChevronDownOutlineMedium')
+    const IconChevronUp = pickIcon('IconChevronUpOutline14', 'IconChevronUpOutlineRegular', 'IconChevronUpOutlineMedium')
+    const IconSparkle = pickIcon('IconSparkle16', 'IconSparkleRegular', 'IconSparkleMedium')
     const Menu = primitives.Menu
 
     const SELECT_CSS = '.dsh-ig-select{box-sizing:border-box;background:var(--dsw-alias-bg-module-platform);height:36px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:18px;align-items:center;gap:12px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex;max-width:min(100%,280px)}.dsh-ig-select:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}.dsh-ig-select:disabled{opacity:.5;cursor:default}.dsh-ig-select-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
@@ -880,14 +883,25 @@ window.__ModuleLoader__.load({
     }
 
     function ImageGenerateToolview(props) {
-      const { block, load } = props
+      const { block } = props
       const t = props.t ?? translateFactory(en)
       if (block === undefined) return null
-      const settled = 'kind' in block
+      // DSH >= 0.1.7 hands explicit phases (preparing/start/result) and an
+      // owner-provided session-authorized image loader; older runtimes
+      // discriminate the node by its `kind` field and use the injected loader.
+      const phase = typeof props.phase === 'string' ? props.phase : ('kind' in block ? 'result' : 'start')
+      const settled = phase === 'result'
       const argsRaw = (settled ? block.call?.argsRaw : block.argsRaw) ?? ''
       const title = `image_generate: ${derivePrompt(argsRaw)}`
       const images = resultImages(block)
       const text = settled ? resultText(block) : ''
+      const load = (image, cwd) => {
+        if (image?.attachment && typeof props.loadImage === 'function') {
+          return Promise.resolve(props.loadImage(image.attachment))
+        }
+        if (typeof props.load === 'function') return props.load(image, cwd)
+        return Promise.reject(new Error('no image loader'))
+      }
       const Sparkle = IconSparkle
       const labels = {
         image: t('image'),
@@ -937,14 +951,94 @@ window.__ModuleLoader__.load({
       }
     }
 
-    const inject = ['slots', 'locale', 'settingsScope', 'remote', 'remote.credentials', 'connection']
+    /**
+     * Adapt a DSH >= 0.1.6 `configForms` entry form to the settingsScope shape
+     * the cards were written against (set(key, value) + mutate(ops)).
+     * `pick` projects the merged entry config into one card's section view.
+     */
+    function adaptConfigForm(form, pick) {
+      return {
+        getSnapshot() {
+          const snap = form.getSnapshot()
+          return {
+            status: snap.status,
+            value: snap.value === undefined ? undefined : pick(snap.value),
+            writable: snap.writable,
+            revision: snap.revision,
+          }
+        },
+        subscribe: (callback) => form.subscribe(callback),
+        set(key, value) {
+          return form.mutate([{ op: 'set', path: [key], value }])
+        },
+        mutate(ops, expectedRevision) {
+          return form.mutate(ops, expectedRevision)
+        },
+      }
+    }
+
+    /** Inert scope for runtimes with no settings surface at all. */
+    function unavailableScope() {
+      return {
+        getSnapshot: () => ({ status: 'unavailable', value: undefined, writable: false, revision: undefined }),
+        subscribe: () => () => {},
+        set: () => Promise.resolve(false),
+        mutate: () => Promise.resolve(false),
+      }
+    }
+
+    /**
+     * Bind the catalog/runtime scopes on whichever settings surface this
+     * runtime has: DSH <= 0.1.5 serves two `settingsScope` namespaces;
+     * DSH >= 0.1.6 serves one merged `configForms` entry (`image-gen`) whose
+     * volatile fields carry both.
+     */
+    function bindScopes(ctx) {
+      const settingsScope = ctx.get('settingsScope')
+      if (settingsScope && typeof settingsScope.bind === 'function') {
+        return {
+          legacy: true,
+          catalog: settingsScope.bind({ namespace: CATALOG_NS }),
+          runtime: settingsScope.bind({ namespace: RUNTIME_NS }),
+        }
+      }
+      const configForms = ctx.get('configForms')
+      if (configForms && typeof configForms.get === 'function') {
+        const form = configForms.get(CATALOG_NS)
+        return {
+          legacy: false,
+          configForms,
+          catalog: adaptConfigForm(form, (value) => ({
+            providers: Array.isArray(value?.providers) ? value.providers : [],
+          })),
+          runtime: adaptConfigForm(form, (value) => ({
+            enabled: value?.enabled !== false,
+            providerId: value?.providerId ?? '',
+            modelId: value?.modelId ?? '',
+            defaultSize: value?.defaultSize ?? '1024x1024',
+            defaultQuality: value?.defaultQuality ?? 'auto',
+          })),
+        }
+      }
+      return { legacy: true, catalog: unavailableScope(), runtime: unavailableScope() }
+    }
+
+    /** plugins.bundle.config page (DSH >= 0.1.6): the runtime picker card. */
+    function RuntimeBundlePage(props) {
+      if (props.view === 'summary') return null
+      return React.createElement('ul', { style: { listStyle: 'none', margin: 0, padding: 0 } },
+        React.createElement(RuntimeCard, props))
+    }
+
+    // 'settingsScope' was removed in DSH 0.1.7 (replaced by 'configForms') and
+    // must not be a hard inject, or this client half never activates there.
+    const inject = ['slots', 'locale', 'remote', 'remote.credentials', 'connection']
 
     function apply(ctx) {
       ensureSelectCss()
       ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-image-generation: copy dictionaries')
       const t = ctx.locale.bind(LOCALE_NS)
-      const catalog = ctx.settingsScope.bind({ namespace: CATALOG_NS })
-      const runtime = ctx.settingsScope.bind({ namespace: RUNTIME_NS })
+      const { legacy, configForms, catalog, runtime } = bindScopes(ctx)
       const connection = ctx.get('connection')
 
       ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -959,13 +1053,25 @@ window.__ModuleLoader__.load({
         }),
       }, CatalogSection))
 
-      ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
-        name: 'settings.plugin.item',
-        key: RUNTIME_NS,
-        priority: 1000,
-        locale: LOCALE_NS,
-        inject: () => ({ catalog, runtime }),
-      }, RuntimeCard))
+      if (legacy) {
+        // DSH <= 0.1.5: the model picker is a card on the Settings plugins page.
+        ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
+          name: 'settings.plugin.item',
+          key: RUNTIME_NS,
+          priority: 1000,
+          locale: LOCALE_NS,
+          inject: () => ({ catalog, runtime }),
+        }, RuntimeCard))
+      } else if (configForms) {
+        // DSH >= 0.1.6: the picker lives on this bundle's Plugins page instead.
+        ctx.effect(() => configForms.whileServed([CATALOG_NS], () =>
+          ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+            name: 'plugins.bundle.config',
+            key: 'dsh-image-generation',
+            locale: LOCALE_NS,
+            inject: () => ({ catalog, runtime }),
+          }, RuntimeBundlePage))), 'dsh-image-generation: plugins page')
+      }
 
       if (connection?.rpc) {
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
