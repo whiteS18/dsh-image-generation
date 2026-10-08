@@ -1,6 +1,6 @@
 {
   "name": "dsh-image-generation",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DSH 生图插件：在设置中配置多个生图供应商/模型，并在对话中通过 image_generate 调用当前选中的模型。",
   "keywords": [
     "deepseek",
