@@ -59,6 +59,16 @@ const providerSchema = z.object({
   baseUrl: z.string(),
   apiFormat: z.string().default('openai-images'),
   apiKeyEnv: z.string().role('credential-ref'),
+  /**
+   * How this provider delivers results:
+   *   auto  — try a synchronous call first; if the gateway answers with a task
+   *           envelope (or rejects the sync shape), fall back to async polling.
+   *   sync  — always one request that returns the image inline.
+   *   async — always submit a task, then poll until it finishes.
+   * Gateways differ in how they signal async: ModelScope uses a header, many
+   * OpenAI-compatible aggregators use an `async: true` body flag — both work.
+   */
+  asyncMode: z.string().default('auto'),
   models: z.array(modelSchema).default([]),
 })
 
@@ -72,6 +82,8 @@ export const RuntimeConfig = z.object({
   modelId: z.string().default(''),
   defaultSize: z.string().default(DEFAULT_SIZE),
   defaultQuality: z.string().default(DEFAULT_QUALITY),
+  /** 'inherit' uses the active provider's own asyncMode. */
+  asyncMode: z.string().default('inherit'),
 })
 
 /**
@@ -95,6 +107,7 @@ export const Config = z.object({
   modelId: maybeVolatile(z.string().default('')),
   defaultSize: maybeVolatile(z.string().default(DEFAULT_SIZE)),
   defaultQuality: maybeVolatile(z.string().default(DEFAULT_QUALITY)),
+  asyncMode: maybeVolatile(z.string().default('auto')),
 })
 
 /**
@@ -119,6 +132,7 @@ function emptyRuntime() {
     modelId: '',
     defaultSize: DEFAULT_SIZE,
     defaultQuality: DEFAULT_QUALITY,
+    asyncMode: 'auto',
   }
 }
 
@@ -166,6 +180,124 @@ function errorOf(payload, status) {
   return detail && String(detail).length > 0
     ? String(detail)
     : `image API error (HTTP ${status})`
+}
+
+/**
+ * Task-based (asynchronous) image generation.
+ *
+ * Gateways differ in three places, all handled here:
+ *   1. how the submit request asks for async  — ModelScope uses the header
+ *      `X-ModelScope-Async-Mode: true`; many OpenAI-compatible aggregators use
+ *      the body field `async: true`.
+ *   2. how completion is signalled — ModelScope: `task_status: SUCCEED`;
+ *      others: the polled body simply contains `data[]` / `candidates[]`
+ *      (there is no status field at all), or `status: failed|expired|canceled`.
+ *   3. where the finished images live — `output_images[]`, `data[].url`, or
+ *      Gemini-style `candidates[].content.parts[].text`.
+ */
+const ASYNC_POLL_INTERVAL_MS = 2_500
+const ASYNC_POLL_TIMEOUT_MS = 300_000
+
+const ASYNC_MODES = Object.freeze(['auto', 'sync', 'async'])
+
+function asyncModeOf(provider) {
+  const mode = String(provider?.asyncMode ?? 'auto').toLowerCase()
+  return ASYNC_MODES.includes(mode) ? mode : 'auto'
+}
+
+/** ModelScope wants the async opt-in as a request header. */
+function wantsAsyncHeader(provider) {
+  return /modelscope\.(cn|ai)/i.test(String(provider?.baseUrl ?? ''))
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(abortedError(signal))
+      return
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort() {
+      clearTimeout(timer)
+      reject(abortedError(signal))
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+/** A submit response that carries a task instead of finished images. */
+function isTaskEnvelope(payload) {
+  if (typeof payload !== 'object' || payload === null) return false
+  if (Array.isArray(payload.data) && payload.data.length > 0) return false
+  return typeof payload.task_id === 'string' && payload.task_id.length > 0
+}
+
+/** Pull image URLs out of whatever shape a finished task uses. */
+function collectTaskImages(payload, out) {
+  let found = false
+  const push = (url) => {
+    if (typeof url !== 'string' || url.length === 0) return
+    out.push({ url, mime: 'image/png' })
+    found = true
+  }
+  // ModelScope: output_images: ["https://..."]
+  if (Array.isArray(payload?.output_images)) {
+    for (const entry of payload.output_images) push(typeof entry === 'string' ? entry : entry?.url)
+  }
+  // OpenAI-compatible aggregators: data: [{ url }]
+  if (Array.isArray(payload?.data)) {
+    for (const entry of payload.data) {
+      if (typeof entry?.b64_json === 'string' && entry.b64_json.length > 0) {
+        pushImage(out, Buffer.from(entry.b64_json, 'base64'), 'image/png')
+        found = true
+        continue
+      }
+      push(entry?.url)
+    }
+  }
+  // Gemini-style: candidates[].content.parts[].text holds the URL
+  if (Array.isArray(payload?.candidates)) {
+    for (const candidate of payload.candidates) {
+      const parts = candidate?.content?.parts
+      if (!Array.isArray(parts)) continue
+      for (const part of parts) push(part?.text)
+    }
+  }
+  return found
+}
+
+function taskFailureOf(payload) {
+  const status = String(payload?.task_status ?? payload?.status ?? '').toLowerCase()
+  if (status === 'failed' || status === 'expired' || status === 'canceled' || status === 'cancelled') {
+    const detail = payload?.error?.message ?? payload?.error ?? payload?.message ?? status
+    return String(detail)
+  }
+  return ''
+}
+
+async function pollImageTask({ baseUrl, taskId, apiKey, signal }) {
+  const url = joinEndpoint(baseUrl, `/tasks/${encodeURIComponent(taskId)}`)
+  const deadline = Date.now() + ASYNC_POLL_TIMEOUT_MS
+  for (;;) {
+    const payload = await getJson(url, {
+      apiKey,
+      signal,
+      headers: { 'X-ModelScope-Task-Type': 'image_generation' },
+    })
+    const failure = taskFailureOf(payload)
+    if (failure) throw new Error(`image async task failed: ${failure}`)
+    if (String(payload?.task_status ?? '').toUpperCase() === 'SUCCEED') return payload
+    // Gateways without a status field simply return the images when ready.
+    const probe = []
+    if (collectTaskImages(payload, probe)) return payload
+    if (Date.now() >= deadline) {
+      throw new Error(`image async task timed out after ${ASYNC_POLL_TIMEOUT_MS}ms (task ${taskId})`)
+    }
+    await sleep(ASYNC_POLL_INTERVAL_MS, signal)
+  }
 }
 
 export function sniffImageMediaType(data) {
@@ -321,11 +453,12 @@ async function readJson(response, signal) {
   }
 }
 
-async function postJson(url, { apiKey, body, signal, googleHost }) {
+async function postJson(url, { apiKey, body, signal, googleHost, headers: extraHeaders }) {
   const headers = {
     'content-type': 'application/json',
     accept: 'application/json',
     'user-agent': USER_AGENT,
+    ...extraHeaders ?? {},
   }
   if (googleHost) headers['x-goog-api-key'] = apiKey
   else headers.authorization = `Bearer ${apiKey}`
@@ -341,6 +474,30 @@ async function postJson(url, { apiKey, body, signal, googleHost }) {
   } catch (error) {
     if (signal?.aborted === true || isAbortError(error)) throw abortedError(signal, error)
     throw new Error(`image generation request failed: ${String(error)}`)
+  }
+  const payload = await readJson(response, signal)
+  if (!response.ok) throw new Error(errorOf(payload, response.status))
+  return payload
+}
+
+async function getJson(url, { apiKey, signal, headers: extraHeaders }) {
+  const headers = {
+    accept: 'application/json',
+    'user-agent': USER_AGENT,
+    authorization: `Bearer ${apiKey}`,
+    ...extraHeaders ?? {},
+  }
+  let response
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      redirect: 'error',
+      headers,
+      ...signal !== undefined ? { signal } : {},
+    })
+  } catch (error) {
+    if (signal?.aborted === true || isAbortError(error)) throw abortedError(signal, error)
+    throw new Error(`image task poll failed: ${String(error)}`)
   }
   const payload = await readJson(response, signal)
   if (!response.ok) throw new Error(errorOf(payload, response.status))
@@ -374,26 +531,100 @@ async function generateOpenAiImages({ provider, model, args, runtime, apiKey, si
   const size = sizeOf(args, runtime)
   const quality = qualityOf(args, runtime)
   const editing = references !== undefined
-  const url = joinEndpoint(provider.baseUrl, editing ? '/images/edits' : '/images/generations')
-  const body = {
-    model,
-    prompt: args.prompt.trim(),
-    n: 1,
-    ...size === 'auto' ? {} : { size },
-    ...quality === 'auto' ? {} : { quality },
-    response_format: 'b64_json',
-    ...editing ? { images: references.map((image_url) => ({ image_url })) } : {},
+  const mode = asyncModeOf(provider)
+  // ModelScope exposes reference-image editing on /images/generations via `image_url`;
+  // there is no /images/edits endpoint on that gateway.
+  const generationUrl = joinEndpoint(provider.baseUrl, '/images/generations')
+  const editingUrl = wantsAsyncHeader(provider) ? generationUrl : joinEndpoint(provider.baseUrl, '/images/edits')
+
+  /** Build the request for one attempt. `asyncShape` asks for a task envelope. */
+  function buildRequest(asyncShape) {
+    const url = editing && !asyncShape && !wantsAsyncHeader(provider) ? editingUrl : generationUrl
+    const body = {
+      model,
+      prompt: args.prompt.trim(),
+      n: 1,
+      ...size === 'auto' ? {} : { size },
+      ...quality === 'auto' ? {} : { quality },
+    }
+    if (!asyncShape) body.response_format = 'b64_json'
+    if (asyncShape) {
+      // ModelScope reads the opt-in from a header; other gateways from the body.
+      if (!wantsAsyncHeader(provider)) body.async = true
+      if (editing) body.image_url = references
+    } else if (editing) {
+      body.images = references.map((image_url) => ({ image_url }))
+    }
+    const headers = asyncShape && wantsAsyncHeader(provider)
+      ? { 'X-ModelScope-Async-Mode': 'true' }
+      : undefined
+    return { url, body, headers }
   }
+
+  async function attempt(asyncShape) {
+    const request = buildRequest(asyncShape)
+    try {
+      const payload = await postJson(request.url, {
+        apiKey,
+        body: request.body,
+        signal,
+        headers: request.headers,
+      })
+      return { payload, request }
+    } catch (error) {
+      if (!/response_format/i.test(String(error?.message ?? error))) throw error
+      const { response_format: _omit, ...rest } = request.body
+      const payload = await postJson(request.url, {
+        apiKey,
+        body: rest,
+        signal,
+        headers: request.headers,
+      })
+      return { payload, request }
+    }
+  }
+
+  const raw = []
+  /** Extract images from a finished response; polls only when the mode allows it. */
+  const finish = async (payload, allowPolling) => {
+    if (isTaskEnvelope(payload)) {
+      if (!allowPolling) {
+        // 'sync' means one round trip. A task envelope means this gateway cannot
+        // answer synchronously, so surface that instead of silently polling.
+        throw new Error(
+          'image_generate: this provider answered with a task instead of an image, '
+          + `so it needs async mode (current: sync). Switch 生成模式 to "自动" or "异步".`,
+        )
+      }
+      const finished = await pollImageTask({
+        baseUrl: provider.baseUrl,
+        taskId: payload.task_id,
+        apiKey,
+        signal,
+      })
+      collectTaskImages(finished, raw)
+    } else {
+      collectOpenAiImages(payload, raw)
+    }
+    return raw
+  }
+
+  if (mode === 'async') {
+    await finish((await attempt(true)).payload, true)
+    return materializeImages(raw, signal)
+  }
+
   let payload
   try {
-    payload = await postJson(url, { apiKey, body, signal })
+    payload = (await attempt(false)).payload
   } catch (error) {
-    if (!/response_format/i.test(String(error?.message ?? error))) throw error
-    const { response_format: _omit, ...rest } = body
-    payload = await postJson(url, { apiKey, body: rest, signal })
+    // `auto`: a gateway that only speaks async rejects the sync shape outright.
+    if (mode !== 'auto') throw error
+    await finish((await attempt(true)).payload, true)
+    return materializeImages(raw, signal)
   }
-  const raw = []
-  collectOpenAiImages(payload, raw)
+  // `auto` polls when the gateway answered with a task; `sync` refuses to poll.
+  await finish(payload, mode === 'auto')
   return materializeImages(raw, signal)
 }
 
@@ -678,8 +909,13 @@ function createImageGenerateTool(ctx, currentCatalog, currentRuntime) {
       const attachments = ctx.get('attachments')
       const references = await resolveReferenceImages(args.referenceImages, attachments, exec.signal)
       const apiKey = await resolveApiKey(ctx, provider.apiKeyEnv, exec.signal)
+      // The plugin page may override the provider-level mode; 'inherit' defers to it.
+      const runtimeMode = String(runtime.asyncMode ?? 'inherit').toLowerCase()
+      const effectiveProvider = ASYNC_MODES.includes(runtimeMode)
+        ? { ...provider, asyncMode: runtimeMode }
+        : provider
       const images = await GENERATORS[provider.apiFormat]({
-        provider,
+        provider: effectiveProvider,
         model: model.id,
         args: { ...args, prompt },
         runtime,
@@ -805,6 +1041,7 @@ export function apply(ctx, config) {
     modelId: read('modelId', ''),
     defaultSize: read('defaultSize', DEFAULT_SIZE),
     defaultQuality: read('defaultQuality', DEFAULT_QUALITY),
+    asyncMode: read('asyncMode', 'auto'),
   })
 
   // DSH <= 0.1.5: the settings service installs schema-driven sections and
