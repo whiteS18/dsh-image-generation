@@ -755,7 +755,7 @@ class BadRequest extends Error {
 }
 
 function registerRpc(ctx) {
-  ctx.inject(['connection'], (scoped) => {
+  ctx.inject(['connection', 'webServer'], (scoped) => {
     const connection = scoped.get('connection')
     if (connection === undefined) return
     scoped.effect(() => connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload, signal) => {
